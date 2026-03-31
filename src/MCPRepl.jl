@@ -15,6 +15,23 @@ Base.displayable(::IOBufferDisplay, _) = true
 Base.display(d::IOBufferDisplay, x) = show(d.io, MIME("text/plain"), x)
 Base.display(d::IOBufferDisplay, mime, x) = show(d.io, mime, x)
 
+function trim_long_content(content::String; max_lines::Int = 100)
+    lines = split(content, '\n')
+    if length(lines) <= max_lines
+        return content
+    end
+
+    # Show first half and last half
+    context_lines = max_lines ÷ 2
+    first_part = join(lines[1:context_lines], '\n')
+    last_part = join(lines[end-context_lines+1:end], '\n')
+
+    omitted_count = length(lines) - max_lines
+    middle = "\n... [$(omitted_count) lines omitted] ...\n"
+
+    return first_part * middle * last_part
+end
+
 function execute_repllike(str)
     # Check for Pkg.activate usage
     if contains(str, "activate(") && !contains(str, r"#.*overwrite no-activate-rule")
@@ -61,6 +78,10 @@ function execute_repllike(str)
 
     # Combine captured output with display output
     display_content = String(take!(disp.io))
+    
+    # Trim long content
+    captured_content = trim_long_content(captured_content)
+    display_content = trim_long_content(display_content)
 
     return captured_content*display_content
 end
@@ -252,7 +273,7 @@ function start!(; verbose::Bool = true)
 
     usage_instructions_tool = MCPTool(
         "usage_instructions",
-        "Get detailed instructions for proper Julia REPL usage, best practices, and workflow guidelines for AI agents.",
+        "Get instructions for proper Julia REPL usage.",
         Dict(
             "type" => "object",
             "properties" => Dict(),
@@ -277,19 +298,18 @@ function start!(; verbose::Bool = true)
         """
         Execute Julia code in a shared, persistent REPL session to avoid startup latency.
 
-        **PREREQUISITE**: Before using this tool, you MUST first call the `usage_instructions` tool to understand proper Julia REPL workflow, best practices, and etiquette for shared REPL usage.
+        **PREREQUISITE**: Before using this tool, you MUST first call the `usage_instructions` tool.
 
-        Once this function is available, **never** use `julia` commands in bash, always use the REPL.
+        Always use the REPL instead of `julia` bash commands.
 
         The tool returns raw text output containing: all printed content from stdout and stderr streams, plus the mime text/plain representation of the expression's return value (unless the expression ends with a semicolon).
 
         You may use this REPL to
-        - execute julia code
         - execute test sets
         - get julia function documentation (i.e. send @doc functionname)
-        - investigate the environment (use investigate_environment tool for comprehensive setup info)
+        - investigate the environment
         """,
-        MCPRepl.text_parameter("expression", "Julia expression to evaluate (e.g., '2 + 3 * 4' or `import Pkg; Pkg.status()`"),
+        MCPRepl.text_parameter("expression", "Julia expression to evaluate (eg `import Pkg; Pkg.status()`"),
         args -> begin
             try
                 execute_repllike(get(args, "expression", ""))
@@ -307,7 +327,6 @@ function start!(; verbose::Bool = true)
         This tool should be called to clean up any trailing spaces that AI agents tend to leave in files after editing.
 
         **Usage Guidelines:**
-        - For single file edits: Call immediately after editing the file
         - For multiple file edits: Call once on each modified file at the very end, before handing back to the user
         - Always call this tool on files you've edited to maintain clean, professional code formatting
 
@@ -367,7 +386,8 @@ function start!(; verbose::Bool = true)
     )
 
     # Create and start server
-    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, whitespace_tool, investigate_tool], 3000; verbose=verbose)
+    #whitespace_tool, , investigate_tool
+    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool], 3000; verbose=verbose)
 
     if isdefined(Base, :active_repl)
         set_prefix!(Base.active_repl)

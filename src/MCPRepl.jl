@@ -42,6 +42,39 @@ function execute_repllike(str)
             If you need to use a third-party 'activate' function, add '# overwrite no-activate-rule' at the end of your command.
         """
     end
+    if contains(str, "Pkg.add(")
+        return """
+            ERROR: Using Pkg.add to install packages is not allowed.
+            You should assume all necessary packages are already installed in the environment.
+            If you need another package, prompt the user!
+        """
+    end
+    # Check for varinfo() usage which is slow and problematic
+    if contains(str, "varinfo(")
+        return """
+            ERROR: Using varinfo() is not allowed because it takes too long to execute.
+            Use the investigate_environment tool instead to get information about the Julia environment.
+            If unclear, ask the user.
+        """
+    end
+    # eval using/import to suppress interactive ask for instllation
+    if contains(str, r"(^|\n)using\s") || contains(str, r"(^|\n)import\s")
+        # Replace each import/using statement with @eval prefix
+        str = replace(str, r"(^|\n)(using\s[^\n]*)" => s"\1@eval \2")
+        str = replace(str, r"(^|\n)(import\s[^\n]*)" => s"\1@eval \2")
+    end
+
+
+    # alternative approach to @eval on using/import?
+    # old_stdin = stdin
+    # redirect_stdin(devnull)
+    # try
+    #     using Optim
+    # catch e
+    #     rethrow(e)
+    # finally
+    #     redirect_stdin(old_stdin)
+    # end
 
     repl = Base.active_repl
     # expr = Meta.parse(str)
@@ -56,7 +89,12 @@ function execute_repllike(str)
     captured_output = Pipe()
     response = redirect_stdout(captured_output) do
         redirect_stderr(captured_output) do
-            r = REPL.eval_with_backend(expr, backend)
+            # Julia 1.12+ renamed eval_with_backend to eval_on_backend
+            r = if VERSION >= v"1.12"
+                REPL.eval_on_backend(expr, backend)
+            else
+                REPL.eval_with_backend(expr, backend)
+            end
             close(Base.pipe_writer(captured_output))
             r
         end
@@ -67,8 +105,12 @@ function execute_repllike(str)
 
     disp = IOBufferDisplay()
 
-    # generate printout, err goest to disp.err, val goes to "specialdisplay" disp
-    REPL.print_response(disp.io, response, backend, !REPL.ends_with_semicolon(str), false, disp)
+    # generate printout, err goes to disp.err, val goes to "specialdisplay" disp
+    if VERSION >= v"1.11"
+        REPL.print_response(disp.io, response, backend, !REPL.ends_with_semicolon(str), false, disp)
+    else
+        REPL.print_response(disp.io, response, !REPL.ends_with_semicolon(str), false, disp)
+    end
 
     # generate the printout again for the "normal" repl
     REPL.print_response(repl, response, !REPL.ends_with_semicolon(str), repl.hascolor)
@@ -400,15 +442,30 @@ end
 function set_prefix!(repl)
     mode = get_mainmode(repl)
     mode.prompt = REPL.contextual_prompt(repl, "✻ julia> ")
+    return nothing
 end
+
 function unset_prefix!(repl)
     mode = get_mainmode(repl)
     mode.prompt = REPL.contextual_prompt(repl, REPL.JULIA_PROMPT)
+    return nothing
 end
+
 function get_mainmode(repl)
-    only(filter(repl.interface.modes) do mode
-        mode isa REPL.Prompt && mode.prompt isa Function && contains(mode.prompt(), "julia>")
-    end)
+    if isdefined(REPL.LineEdit, :find_mode) && hasmethod(REPL.LineEdit.find_mode, Tuple{Any,Symbol})
+        mode = REPL.LineEdit.find_mode(repl.interface.modes, :julia)
+        !isnothing(mode) && return mode
+    end
+
+    modes = filter(repl.interface.modes) do mode
+        mode isa REPL.LineEdit.Prompt && mode.prompt isa Function && contains(mode.prompt(), "julia>")
+    end
+
+    if isempty(modes)
+        error("Could not find Julia REPL main mode")
+    end
+
+    return first(modes)
 end
 
 function stop!()

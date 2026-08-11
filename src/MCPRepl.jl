@@ -34,14 +34,14 @@ end
 
 function execute_repllike(str)
     # Check for Pkg.activate usage
-    if contains(str, "activate(") && !contains(str, r"#.*overwrite no-activate-rule")
-        return """
-            ERROR: Using Pkg.activate to change environments is not allowed.
-            You should assume you are in the correct environment for your tasks.
-            You may use Pkg.status() to see the current environment and available packages.
-            If you need to use a third-party 'activate' function, add '# overwrite no-activate-rule' at the end of your command.
-        """
-    end
+    # if contains(str, "activate(") && !contains(str, r"#.*overwrite no-activate-rule")
+    #     return """
+    #         ERROR: Using Pkg.activate to change environments is not allowed.
+    #         You should assume you are in the correct environment for your tasks.
+    #         You may use Pkg.status() to see the current environment and available packages.
+    #         If you need to use a third-party 'activate' function, add '# overwrite no-activate-rule' at the end of your command.
+    #     """
+    # end
     if contains(str, "Pkg.add(")
         return """
             ERROR: Using Pkg.add to install packages is not allowed.
@@ -50,13 +50,13 @@ function execute_repllike(str)
         """
     end
     # Check for varinfo() usage which is slow and problematic
-    if contains(str, "varinfo(")
-        return """
-            ERROR: Using varinfo() is not allowed because it takes too long to execute.
-            Use the investigate_environment tool instead to get information about the Julia environment.
-            If unclear, ask the user.
-        """
-    end
+    # if contains(str, "varinfo(")
+    #     return """
+    #         ERROR: Using varinfo() is not allowed because it takes too long to execute.
+    #         Use the investigate_environment tool instead to get information about the Julia environment.
+    #         If unclear, ask the user.
+    #     """
+    # end
     # eval using/import to suppress interactive ask for instllation
     if contains(str, r"(^|\n)using\s") || contains(str, r"(^|\n)import\s")
         # Replace each import/using statement with @eval prefix

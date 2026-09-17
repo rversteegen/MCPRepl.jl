@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# mcp-julia-harness
+# Runs the Julia MCP server, restarting it whenever it exits with the
+# sentinel code used by MCPRepl's restart_repl tool.
+set -u
+RESTART_CODE=${MCPREPL_RESTART_CODE:-42}
+
+while :; do
+    julia --project=. --interactive -e 'using MCPRepl; MCPRepl.start!()'
+    code=$?
+    if [ "$code" -eq "$RESTART_CODE" ]; then
+        echo "[mcp-julia-harness] restarting Julia MCP server" >&2
+        continue
+    fi
+    echo "[mcp-julia-harness] Julia exited with code $code" >&2
+    break
+done

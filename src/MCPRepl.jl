@@ -32,7 +32,78 @@ function trim_long_content(content::String; max_lines::Int = 100)
     return first_part * middle * last_part
 end
 
+# The active REPL is only usable once its interface has been created.
+# When Julia is started as `julia -i -e 'MCPRepl.start!()'` (as the
+# mcp-julia-harness does), the MCP server comes up before the interactive REPL
+# exists, so tool calls can arrive while `Base.active_repl` is still being set
+# up. Wait for the REPL instead of erroring out.
+function repl_is_ready(repl)
+    repl === nothing && return false
+    return repl isa REPL.LineEditREPL &&
+           isdefined(repl, :interface) &&
+           isdefined(repl, :backendref) &&
+           repl.mistate !== nothing
+end
+
+function wait_for_active_repl(; timeout::Real = 30.0)
+    deadline = time() + timeout
+    while true
+        if isdefined(Base, :active_repl)
+            repl = getfield(Base, :active_repl)
+            repl_is_ready(repl) && return repl
+        end
+        time() >= deadline && return nothing
+        sleep(0.05)
+    end
+end
+
+# `redirect_stdout` / `redirect_stderr` mutate process-global state and restore
+# whatever stream was installed when they were entered. Two overlapping tool
+# calls therefore restore each other's capture pipes instead of the terminal,
+# and `stdout` is left pointing at a closed pipe -- after which every echo the
+# REPL writes disappears (the "agent>" line shows up empty and no output ever
+# reaches the terminal again). Serialize evaluation, and always restore the
+# streams that were live when the server started.
+const EXEC_LOCK = ReentrantLock()
+const ORIG_STDOUT = Ref{Union{Nothing, IO}}(nothing)
+const ORIG_STDERR = Ref{Union{Nothing, IO}}(nothing)
+
+function remember_std_streams!()
+    ORIG_STDOUT[] === nothing && (ORIG_STDOUT[] = stdout)
+    ORIG_STDERR[] === nothing && (ORIG_STDERR[] = stderr)
+    return nothing
+end
+
+function restore_std_streams!()
+    o = ORIG_STDOUT[]
+    o !== nothing && o !== stdout && redirect_stdout(o)
+    e = ORIG_STDERR[]
+    e !== nothing && e !== stderr && redirect_stderr(e)
+    return nothing
+end
+
+# Echoes must go to the REPL's own terminal, never to the global `stdout`,
+# which is redirected into a capture pipe while user code runs.
+function repl_outstream(repl)
+    try
+        return REPL.outstream(repl)
+    catch
+        return something(ORIG_STDOUT[], stdout)
+    end
+end
+
 function execute_repllike(str)
+    return lock(EXEC_LOCK) do
+        restore_std_streams!()
+        try
+            return _execute_repllike(str)
+        finally
+            restore_std_streams!()
+        end
+    end
+end
+
+function _execute_repllike(str)
     # Check for Pkg.activate usage
     # if contains(str, "activate(") && !contains(str, r"#.*overwrite no-activate-rule")
     #     return """
@@ -76,32 +147,54 @@ function execute_repllike(str)
     #     redirect_stdin(old_stdin)
     # end
 
-    repl = Base.active_repl
+    if isempty(strip(str))
+        return """
+            ERROR: no `expression` argument was received, so nothing was evaluated.
+            Pass the Julia code to run in the `expression` parameter.
+        """
+    end
+
+    repl = wait_for_active_repl()
+    if repl === nothing
+        return """
+            The Julia REPL is not ready yet. It may still be starting up (e.g. right after a restart).
+            Wait a moment and try again.
+        """
+    end
     # expr = Meta.parse(str)
     expr = Base.parse_input_line(str)
     backend = repl.backendref
 
+    termout = repl_outstream(repl)
     REPL.prepare_next(repl)
-    printstyled("\nagent> ", color=:red, bold=:true)
-    print(str, "\n")
+    printstyled(termout, "\nagent> ", color=:red, bold=true)
+    print(termout, str, "\n")
 
     # Capture stdout/stderr during execution
     captured_output = Pipe()
-    response = redirect_stdout(captured_output) do
-        redirect_stderr(captured_output) do
-            # Julia 1.12+ renamed eval_with_backend to eval_on_backend
-            r = if VERSION >= v"1.12"
-                REPL.eval_on_backend(expr, backend)
-            else
-                REPL.eval_with_backend(expr, backend)
-            end
+    saved_stdout, saved_stderr = stdout, stderr
+    response = try
+        redirect_stdout(captured_output)
+        redirect_stderr(captured_output)
+        # Julia 1.12+ renamed eval_with_backend to eval_on_backend
+        if VERSION >= v"1.12"
+            REPL.eval_on_backend(expr, backend)
+        else
+            REPL.eval_with_backend(expr, backend)
+        end
+    finally
+        # Restore first, so a failure below can never leave the process with a
+        # dead `stdout`; closing the writer unblocks the `read` that follows.
+        redirect_stdout(saved_stdout)
+        redirect_stderr(saved_stderr)
+        try
             close(Base.pipe_writer(captured_output))
-            r
+        catch
         end
     end
     captured_content = read(captured_output, String)
     # reshow the stuff which was printed to stdout/stderr before
-    print(captured_content)
+    print(termout, captured_content)
 
     disp = IOBufferDisplay()
 
@@ -129,6 +222,10 @@ function execute_repllike(str)
 end
 
 SERVER = Ref{Union{Nothing, MCPServer}}(nothing)
+
+# Exit code the restart_repl tool uses to signal the launching harness
+# (mcp-julia-harness) to restart the Julia process.
+const RESTART_EXIT_CODE = 42
 
 function repl_status_report()
     if !isdefined(Main, :Pkg)
@@ -311,6 +408,7 @@ function repl_status_report()
 end
 
 function start!(; verbose::Bool = true)
+    remember_std_streams!()
     SERVER[] !== nothing && stop!() # Stop existing server if running
 
     usage_instructions_tool = MCPTool(
@@ -340,9 +438,9 @@ function start!(; verbose::Bool = true)
         """
         Execute Julia code in a shared, persistent REPL session to avoid startup latency.
 
-        **PREREQUISITE**: Before using this tool, you MUST first call the `usage_instructions` tool.
+        Before using this tool, you MUST first call the `usage_instructions` tool.
 
-        Always use the REPL instead of `julia` bash commands.
+        Prefer the REPL instead of `julia` bash commands.
 
         The tool returns raw text output containing: all printed content from stdout and stderr streams, plus the mime text/plain representation of the expression's return value (unless the expression ends with a semicolon).
 
@@ -356,7 +454,7 @@ function start!(; verbose::Bool = true)
             try
                 execute_repllike(get(args, "expression", ""))
             catch e
-                println("Error during execute_repllike", e)
+                println(something(ORIG_STDOUT[], stdout), "Error during execute_repllike: ", e)
                 "Apparently there was an **internal** error to the MCP server: $e"
             end
         end
@@ -427,16 +525,57 @@ function start!(; verbose::Bool = true)
         end
     )
 
+    restart_tool = MCPTool(
+        "restart_repl",
+        """Restart the Julia MCP REPL process.
+
+        Use this when the REPL session is in a broken or unrecoverable state (e.g. Revise errors, corrupted state).
+        julia will be relaunched, restarting the MCP server.
+
+        **Wait a few seconds** after calling this tool.""",
+        Dict(
+            "type" => "object",
+            "properties" => Dict(),
+            "required" => []
+        ),
+        args -> begin
+            @async begin
+                sleep(0.5)
+                exit(RESTART_EXIT_CODE)
+            end
+            "Restarting the Julia process... **Wait a few seconds** before using any other tool."
+        end
+    )
+
     # Create and start server
     #whitespace_tool, , investigate_tool
-    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool], 3000; verbose=verbose)
+    SERVER[] = start_mcp_server([usage_instructions_tool, repl_tool, restart_tool], 3000; verbose=verbose)
 
     if isdefined(Base, :active_repl)
-        set_prefix!(Base.active_repl)
+        repl = getfield(Base, :active_repl)
+        isdefined(repl, :interface) ? set_prefix!(repl) : set_prefix_when_ready!(repl)
     else
-        atreplinit(set_prefix!)
+        atreplinit(set_prefix_when_ready!)
     end
     nothing
+end
+
+# `atreplinit` hooks run before the REPL interface has been created (Julia
+# >= 1.12), so touching `repl.interface` from there throws an `UndefRefError`.
+# Defer the prompt update until the interface is available; blocking inside the
+# hook would prevent the REPL (which creates the interface in another task)
+# from ever starting.
+function set_prefix_when_ready!(repl; timeout::Real = 10.0)
+    @async begin
+        deadline = time() + timeout
+        while !isdefined(repl, :interface)
+            time() >= deadline && return nothing
+            sleep(0.05)
+        end
+        set_prefix!(repl)
+        return nothing
+    end
+    return nothing
 end
 
 function set_prefix!(repl)
@@ -474,7 +613,8 @@ function stop!()
         stop_mcp_server(SERVER[])
         SERVER[] = nothing
         if isdefined(Base, :active_repl)
-            unset_prefix!(Base.active_repl) # Reset the prompt prefix
+            repl = getfield(Base, :active_repl)
+            isdefined(repl, :interface) && unset_prefix!(repl) # Reset the prompt prefix
         end
     else
         println("No server running to stop.")

@@ -1,9 +1,7 @@
 # Julia REPL Workflow
 
 ## Quick Start
-Use `exec_repl` for Julia development. If the REPL tool doesn't work when you try to use it, ask the user to fix it instead of running julia via bash.
-
-**NEVER attempt to kill Julia processes**
+Use `exec_repl` for Julia development. If the REPL tool doesn't work when you try to use it, consider asking the user to fix it instead of running julia via bash.
 
 ## Best Practices ✅
 
@@ -13,12 +11,11 @@ Use `let` blocks for temporary computations to avoid cluttering global scope:
 ```julia
 let x = 10, y = 20
     result = x + y
-    println("Result: $result")
 end
 ```
 
 ### Testing
-**AVOID `Pkg.test()` (too slow)**. Use targeted approaches:
+Use targeted approaches:
 
 ```julia
 @test my_function(1) == 2
@@ -32,7 +29,7 @@ end
 ```
 
 ### Documentation
-**Always check documentation before using unfamiliar functions:**
+**Check documentation before using unfamiliar functions:**
 
 ```julia
 @doc function_name      # Function documentation
@@ -45,15 +42,16 @@ methodswith(String)     # Methods with specific type
 
 ## What NOT TO DO ❌
 
-- **Don't install packages yourself** - ask the user to do it
-- **Don't kill Julia processes or manage the MCP server**
+- **Don't install packages yourself** - ask the user to do it (and if you're asked to, always use `add --preserve-all`
 - **Don't clutter global scope** - use `let` blocks
 - **Don't use `Pkg.test()`** - too slow, ask permission first
 
 ## Troubleshooting
 If Revise starts erroring or doesn't seem to work:
 1. Try using `include()` instead of `includet()`
-2. If that's not enough, ask the user to restart the REPL
+2. If that's not enough, restart the REPL with the restart_repl tool
 
-## Revise.jl Integration
+## Revise.jl + CodeTracking.jl Integration
 Changes to `includet`'ed files are automatically picked up and usually don't need to be re-included.
+
+You can use CodeTracking functions such as whereis, definition, to check what names in scope actually refer to.
